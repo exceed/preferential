@@ -1,0 +1,250 @@
+Preferential allows you add preferences to your ActiveRecord models, the neat, simple and elegant way.
+
+Preferential borrows heavily from Christopher J Bottaro's plugin called [has_easy](https://github.com/cjbottaro/has_easy). So much that even the API
+hasn't changed much barring a few minor differences.
+
+1. The plugin is Rails 3 compatible
+2. Minor typos that caused errors in the original plugin have been fixed
+3. The plugin *drops support* for the aliases feature. Calling the same thing with many names just creates more problems.
+
+What's the difference between flags, preferences and options? Nothing really, they are just "has many" relationships. So there should be no reason to
+install a separate plugin for each one. This plugin can be used to add preferences, flags, options, etc to any ActiveRecord model.
+
+==Installation
+ git clone git://github.com/exceed/preferential.git vendor/plugins/preferential
+ rails g install preferential:migration
+ rake db:migrate
+ rake db:test:prepare
+
+==Basics
+
+ class User < ActiveRecord::Base
+   has_numerous :preferences do |p|
+     p.define :color
+     p.define :theme
+   end
+
+   has_numerous :flags do |f|
+     f.define :is_admin
+     f.define :is_spammer
+   end
+ end
+
+ user = User.new
+
+ # hash like access
+ user.preferences[:color] = 'red'
+ user.preferences[:color] # => 'red'
+
+ # object like access
+ user.preferences.theme? # => false, is theme is not set
+ user.preferences.theme = "savage thunder"
+ user.preferences.theme # => "savage thunder"
+ user.preferences.theme? # => true, as theme is now set
+
+ # easy access for form inputs
+ user.flags_is_admin? # => false
+ user.flags_is_admin = true
+ user.flags_is_admin # => true
+ user.flags_is_admin? # => true
+
+ # save user's preferences
+ user.preferences.save # will save silently and add validation errors to the user model
+ user.errors.empty? # hopefully true
+
+ # save user's flags
+ user.flags.save! # will raise exception on validation errors
+
+
+==Advanced Usage
+There are a lot of options that you can use with preferential:
+* default values
+* inheriting default values from parent associations
+* calculated default values
+* type checking values
+* validating values
+* preprocessing values
+In this section, we'll go over how to use each option and explain how it is used.
+
+===:default
+Very simple. It sets a default value for the preference even when none exist on the DB.
+ class User < ActiveRecord::Base
+   has_numerous :options do |p|
+     p.define :gender, :default => 'female'
+   end
+ end
+
+ User.new.options.gender # => 'female'
+
+===:default_through
+Allows the model to inherit it's default value from other associated models.
+ class Account < ActiveRecord::Base
+   has_many :users
+   has_numerous :options do |p|
+     p.define :locale, :default => 'en'
+   end
+ end
+ class User < ActiveRecord::Base
+   belongs_to :client
+   has_numerous :options do |p|
+     p.define :gender, :default_through => :account
+   end
+ end
+
+ account = Account.create
+ user = account.users.create
+ user.options.locale # => 'en'
+
+ user.options.locale = 'es'
+ client.options.save
+ user.client(true) # reload association
+ user.options.gender # => 'es'
+
+ User.new.options.gender => 'en'
+
+
+===:default_dynamic
+Allows for calculated default values.
+  class User < ActiveRecord::Base
+    has_numerous 'prefs' do |t|
+      t.define :likes_cheese, :default_dynamic => :defaults_to_like_cheese
+      t.define :is_dumb, :default_dynamic => Proc.new{ |user| user.dumb_post_count > 10 }
+    end
+
+    def defaults_to_like_cheese
+      cheesy_post_count > 10
+    end
+  end
+
+  user = User.new :cheesy_post_count => 5
+  user.prefs.likes_cheese? => false
+
+  user = User.new :cheesy_post_count => 11
+  user.prefs.likes_cheese? => true
+
+  user = User.new :dumb_post_count => 5
+  user.prefs.is_dumb? => false
+
+  user = User.new :dumb_post_count => 11
+  user.prefs.is_dumb? => true
+
+
+===:type_check
+Allows type checking of values (for people who are into that).
+  class User < ActiveRecord::Base
+    has_numerous :prefs do |p|
+      p.define :theme, :type_check => String
+      p.define :dollars, :type_check => [Fixnum, Bignum]
+    end
+  end
+
+  user.prefs.theme = 123
+  user.prefs.save! # ActiveRecord::InvalidRecord exception raised with message like:
+                   # 'theme' for has_numerous('prefs') failed type check
+
+  user.prefs.dollars = "hello world"
+  user.prefs.save
+  user.errors.empty? # => false
+  user.errors.on(:prefs) # => 'dollars' for has_numerous('prefs') failed type check
+
+
+===:validate
+Make sure that values fit some kind of criteria. If you use a Proc or name a method with a Symbol to do validation, there are three ways to specify
+failure:
+1. return false
+2. raise a HasEasy::ValidationError
+3. return an array of custom validation error messages
+  class User < ActiveRecord::Base
+    has_numerous :prefs do |p|
+      p.define :foreground, :validate => ['red', 'blue', 'green']
+      p.define :background, :validate => Proc.new{ |value| %w[black white grey].include?(value) }
+      p.define :midground,  :validate => :midground_validator
+    end
+    def midground_validator(value)
+      return ["msg1", msg2] unless %w[yellow brown purple].include?(value)
+    end
+  end
+
+  user.prefs.foreground = 'yellow'
+  user.prefs.save! # ActiveRecord::InvalidRecord exception raised with message like:
+                   # 'theme' for has_numerous('prefs') failed validation
+
+  user.prefs.background = "pink"
+  user.prefs.save
+  user.errors.empty? => false
+  user.errors.on(:prefs) => 'background' for has_numerous('prefs') failed validation
+
+  user.prefs.midground = "black"
+  user.prefs.save
+  user.errors.on(:prefs)[0] => "msg1"
+  user.errors.on(:prefs)[1] => "msg2"
+
+
+===:preprocess
+Alter the value before it goes through type checking and/or validation.  This is useful when working with forms and boolean values.  CAREFUL!!  This option only applies to the underscore accessors, i.e. <tt>prefs_likes_cheese=</tt>, not <tt>prefs.likes_cheese=</tt> or <tt>prefs[:likes_cheese]=</tt>.
+  class User < ActiveRecord::Base
+    has_numerous :prefs do |p|
+      p.define :likes_cheese, :validate => [true, false],
+                              :preprocess => Proc.new{ |value| ['true', 'yes'].include?(value) ? true : false }
+    end
+  end
+
+  user.prefs.likes_cheese = 'yes' # :preprocess NOT invoked; it only applies to underscore accessors!!
+  user.prefs.likes_cheese
+  => 'yes'
+  user.prefs.save! # exception, validation failed
+
+  user.prefs_likes_cheese = 'yes' # :preprocess invoked
+  user.prefs.likes_cheese
+  => true
+  user.prefs.save! # no exception
+
+
+===:postprocess
+Alter the value when it is read.  This is useful when working with forms and boolean values.  CAREFUL!!  This option only applies to the underscore accessors, i.e. <tt>prefs_likes_cheese</tt>, not <tt>prefs.likes_cheese</tt> or <tt>prefs[:likes_cheese]</tt>.
+  class User < ActiveRecord::Base
+    has_numerous :prefs do |p|
+      p.define :likes_cheese, :validate => [true, false],
+                              :postprocess => Proc.new{ |value| value ? 'yes' : 'no' }
+    end
+  end
+
+  user.prefs.likes_cheese = true
+  user.prefs.likes_cheese # :postprocess NOT invoked, it only applies to underscore accessors
+  => true
+  user.prefs_likes_cheese # :postprocess invoked
+  => 'yes'
+
+==Using with Forms
+Suppose you have a <tt>has_numerous</tt> field defined as a boolean and you want to use it with a checkbox in <tt>form_for</tt>.
+
+  (model)
+
+  class User < ActiveRecord::Base
+    has_numerous :prefs do |p|
+      p.define :likes_cheese, :type_check => [TrueClass, FalseClass],
+                              :preprocess => Proc.new{ |value| value == 'yes' },
+                              :postprocess => Proc.new{ |value| value ? 'yes' : 'no' }
+    end
+  end
+
+  (view)
+
+  <% form_for(@user) do |f| %>
+    <%= f.check_box 'user', 'prefs_likes_cheese', {}, 'yes', 'no' %> # invokes @user.prefs_likes_cheese which does the :postprocess
+  <% end %>
+
+  (controller)
+
+  @user.update_attributes(params[:user]) # invokes @user.prefs_likes_cheese= which does the :preprocess
+  @user.prefs.save
+  @user.prefs.likes_cheese
+  => true or false
+  @user.prefs_likes_cheese # remember, only underscore accessors invoke the :preprocess and :postprocess options
+  => 'yes' or 'no'
+
+The general idea is that we make the form use <tt>prefs_likes_cheese=</tt> and <tt>prefs_likes_cheese</tt> accessors which in turn use the :preprocess
+and :postprocess options. Then in our normal code, we use <tt>prefs.likes_cheese</tt> or <tt>prefs[:likes_cheese]</tt> accessors to get our expected
+boolean values.
+
+Copyright (c) 2008 Christopher J. Bottaro <cjbottaro@alumni.cs.utexas.edu>, released under the MIT license
